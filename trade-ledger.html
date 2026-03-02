@@ -1,0 +1,949 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+<meta name="mobile-web-app-capable" content="yes"/>
+<meta name="theme-color" content="#080b10"/>
+<title>📒 Trade Ledger</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<style>
+*,*::before,*::after{box-sizing:border-box;-webkit-tap-highlight-color:transparent;margin:0;padding:0}
+body{background:#080b10;color:#fff;font-family:'Palatino Linotype',Palatino,Georgia,serif;min-height:100vh}
+input[type=date]::-webkit-calendar-picker-indicator{filter:invert(1);opacity:.35}
+input::placeholder,textarea::placeholder{color:rgba(255,255,255,.2);font-style:italic}
+input:focus,textarea:focus{border-color:rgba(245,200,66,.5)!important;outline:none}
+textarea{resize:vertical}
+::-webkit-scrollbar{width:5px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:rgba(245,200,66,.25);border-radius:4px}
+.glow{position:fixed;inset:0;z-index:0;pointer-events:none;
+  background:radial-gradient(ellipse 90% 50% at 15% 0%,rgba(245,200,66,.07) 0%,transparent 55%),
+             radial-gradient(ellipse 60% 40% at 85% 100%,rgba(61,220,132,.06) 0%,transparent 55%)}
+.desktop-layout{display:flex}
+.mobile-layout,.mobile-nav{display:none!important}
+@media(max-width:767px){
+  .desktop-layout{display:none!important}
+  .mobile-layout{display:block!important;position:fixed;left:0;right:0;top:56px;bottom:64px;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:14px 13px 20px;z-index:5}
+  .mobile-nav{display:flex!important;position:fixed;bottom:0;left:0;right:0;height:64px;z-index:50;background:rgba(8,11,16,.98);border-top:1px solid rgba(255,255,255,.09)}
+}
+.modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.92);z-index:1000;display:flex;align-items:flex-start;justify-content:center;padding:20px;overflow-y:auto}
+.sync-pill{display:inline-flex;align-items:center;gap:5px;font-size:10px;padding:3px 10px;border-radius:20px;border:1px solid;margin-left:8px;vertical-align:middle}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const {useState, useMemo, useEffect, useCallback} = React;
+
+/* ─── CONSTANTS ─── */
+const GOLD='#f5c842', GREEN='#3ddc84', RED='#ff6b6b';
+const CARD='rgba(255,255,255,.045)', BORDER='rgba(255,255,255,.09)';
+const LS_SYNC='tradeLedger_v2_sync';
+const LS_DISCLAIMER='tradeLedger_disclaimer_accepted';
+const PANTRY_BASE='https://getpantry.cloud/apiv1/pantry';
+const BASKET='TradeLedger';
+const DEFAULT_PANTRY_ID='405f8eb8-de64-4f88-866c-c190b14da28a';
+const INIT={partyName:'',weight:'',rate:'',amount:'',date:'',type:'bought',narration:''};
+
+/* ─── HELPERS ─── */
+const fmtINR = n => Number(n||0).toLocaleString('en-IN');
+const fmtDate = d => new Date(d).toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'numeric'});
+const todayISO = () => new Date().toISOString().split('T')[0];
+const sumW = arr => arr.reduce((s,e) => s + +e.weight, 0);
+const sumA = arr => arr.reduce((s,e) => s + +e.amount, 0);
+const avgR = arr => sumW(arr) ? Math.round(sumA(arr)/sumW(arr)) : 0;
+const lsSave = (k,v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch(e){} };
+const lsLoad = (k,fb) => { try { const d=localStorage.getItem(k); return d?JSON.parse(d):fb; } catch(e){ return fb; } };
+
+const IS = {
+  width:'100%', background:'rgba(255,255,255,.06)',
+  border:'1px solid rgba(255,255,255,.11)', borderRadius:10,
+  padding:'12px 14px', color:'#fff', fontSize:15, fontFamily:'inherit', outline:'none'
+};
+
+/* ─── ENCRYPTION ─── */
+const enc_ = new TextEncoder(), dec_ = new TextDecoder();
+function bytesToHex(buf){ return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join(''); }
+function hexToBytes(hex){ const b=new Uint8Array(hex.length/2); for(let i=0;i<b.length;i++) b[i]=parseInt(hex.substr(i*2,2),16); return b; }
+async function deriveKey(pw, saltHex){
+  const km = await crypto.subtle.importKey('raw',enc_.encode(pw),{name:'PBKDF2'},false,['deriveKey']);
+  return crypto.subtle.deriveKey({name:'PBKDF2',salt:hexToBytes(saltHex),iterations:200000,hash:'SHA-256'},km,{name:'AES-GCM',length:256},false,['encrypt','decrypt']);
+}
+async function encryptData(pw, saltHex, data){
+  const key = await deriveKey(pw, saltHex);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = await crypto.subtle.encrypt({name:'AES-GCM',iv}, key, enc_.encode(JSON.stringify(data)));
+  return bytesToHex(iv)+':'+bytesToHex(ct);
+}
+async function decryptData(pw, saltHex, payload){
+  const [ivHex,ctHex] = payload.split(':');
+  const key = await deriveKey(pw, saltHex);
+  const pt = await crypto.subtle.decrypt({name:'AES-GCM',iv:hexToBytes(ivHex)}, key, hexToBytes(ctHex));
+  return JSON.parse(dec_.decode(pt));
+}
+
+/* ─── CLOUD ─── */
+async function cloudPush(pantryId, pw, salt, entries){
+  const cipher = await encryptData(pw, salt, {entries, ts:Date.now()});
+  const r = await fetch(`${PANTRY_BASE}/${pantryId}/basket/${BASKET}`, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({cipher, createdAt:Date.now(), v:1})
+  });
+  if(!r.ok) throw new Error('HTTP '+r.status);
+}
+async function cloudPull(pantryId, pw, salt){
+  const r = await fetch(`${PANTRY_BASE}/${pantryId}/basket/${BASKET}`);
+  if(r.status===400||r.status===404) throw new Error('NOBASKET');
+  if(!r.ok) throw new Error('HTTP '+r.status);
+  const p = await r.json();
+  if(p.createdAt && Date.now()-p.createdAt > 7*24*60*60*1000) throw new Error('EXPIRED');
+  return decryptData(pw, salt, p.cipher);
+}
+async function cloudDeleteBasket(pantryId){
+  const r = await fetch(`${PANTRY_BASE}/${pantryId}/basket/${BASKET}`, {method:'DELETE'});
+  if(!r.ok && r.status!==404 && r.status!==400) throw new Error('HTTP '+r.status);
+}
+
+/* ═══════════════════════════════════════
+   COMPONENTS (all top-level — fixes focus bug)
+═══════════════════════════════════════ */
+
+function Field({label, children}){
+  return (
+    <div style={{marginBottom:14}}>
+      <label style={{display:'block',color:'rgba(255,255,255,.38)',fontSize:10,letterSpacing:3,textTransform:'uppercase',marginBottom:7}}>{label}</label>
+      {children}
+    </div>
+  );
+}
+
+/* ─── DISCLAIMER + PASSPHRASE SETUP ─── */
+function DisclaimerModal({onAccept}){
+  const [pw, setPw] = useState('');
+  const [show, setShow] = useState(false);
+  const [err, setErr] = useState('');
+  const handle = () => {
+    if(!pw || pw.length < 4){ setErr('Please enter a passphrase (min 4 chars)'); return; }
+    onAccept(pw);
+  };
+  return (
+    <div className="modal-bg">
+      <div style={{background:'#0f1318',border:'2px solid rgba(245,200,66,.35)',borderRadius:20,padding:28,maxWidth:480,width:'100%',marginTop:'auto',marginBottom:'auto',maxHeight:'90vh',overflowY:'auto'}}>
+        <div style={{color:GOLD,fontSize:20,fontWeight:'bold',marginBottom:4}}>⚖️ Important Notice</div>
+        <div style={{color:'rgba(255,255,255,.45)',fontSize:11,letterSpacing:2,textTransform:'uppercase',marginBottom:18}}>Please read before continuing</div>
+        <div style={{color:'rgba(255,255,255,.75)',fontSize:13,lineHeight:1.8,marginBottom:16}}>
+          This application is provided <strong style={{color:GOLD}}>strictly for educational and personal record-keeping purposes only</strong>.
+        </div>
+        <ul style={{color:'rgba(255,255,255,.6)',fontSize:12,lineHeight:2,paddingLeft:18,marginBottom:18}}>
+          <li>This tool does <strong>not</strong> constitute financial, legal, or commercial advice.</li>
+          <li>The developer accepts <strong>no liability</strong> for how this tool is used.</li>
+          <li>All data is encrypted on your device. The server stores only encrypted blobs.</li>
+          <li>Cloud data is automatically deleted after <strong>7 days</strong>.</li>
+          <li>You are solely responsible for compliance with applicable laws and regulations.</li>
+          <li>Do not use this for any unlawful purpose.</li>
+        </ul>
+        <div style={{background:'rgba(245,200,66,.07)',border:'1px solid rgba(245,200,66,.2)',borderRadius:10,padding:'10px 14px',fontSize:11,color:'rgba(255,255,255,.5)',marginBottom:20}}>
+          By continuing you confirm you have read and agree to the above terms.
+        </div>
+        <div style={{marginBottom:20}}>
+          <div style={{color:'rgba(255,255,255,.38)',fontSize:10,letterSpacing:3,textTransform:'uppercase',marginBottom:7}}>🔐 Set Your Encryption Passphrase</div>
+          <div style={{color:'rgba(255,255,255,.4)',fontSize:11,marginBottom:10,lineHeight:1.6}}>
+            Encrypts all your data before it goes to the cloud. <strong style={{color:GOLD}}>Write it down — you need it on every device.</strong>
+          </div>
+          <div style={{position:'relative'}}>
+            <input style={{...IS,paddingRight:42}} type={show?'text':'password'} placeholder="e.g. MyTrade@2024"
+              value={pw} onChange={e=>{setPw(e.target.value);setErr('');}}
+              onKeyDown={e=>e.key==='Enter'&&handle()}/>
+            <button onClick={()=>setShow(p=>!p)} style={{position:'absolute',right:10,top:'50%',transform:'translateY(-50%)',background:'none',border:'none',cursor:'pointer',fontSize:16,color:'rgba(255,255,255,.4)'}}>
+              {show?'🙈':'👁️'}
+            </button>
+          </div>
+          {err && <div style={{color:RED,fontSize:11,marginTop:6}}>⚠️ {err}</div>}
+        </div>
+        <button onClick={handle} style={{width:'100%',background:`linear-gradient(135deg,${GOLD},#c08c08)`,border:'none',borderRadius:12,padding:'14px',color:'#000',fontSize:14,fontWeight:'bold',fontFamily:'inherit',cursor:'pointer'}}>
+          ✅ I Understand — Start App
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ─── SYNC MODAL (for advanced/reset use) ─── */
+function SyncModal({syncCfg, onSave, onClose}){
+  const [pantryId, setPantryId] = useState(syncCfg?.apiKey||DEFAULT_PANTRY_ID);
+  const [pw, setPw] = useState(syncCfg?.passphrase||'');
+  const [salt] = useState(()=>syncCfg?.salt||bytesToHex(crypto.getRandomValues(new Uint8Array(16))));
+  const [show, setShow] = useState(false);
+  return (
+    <div className="modal-bg" onClick={onClose}>
+      <div style={{background:'#0f1318',border:`1px solid ${BORDER}`,borderRadius:20,padding:26,maxWidth:460,width:'100%',maxHeight:'85vh',overflowY:'auto',marginTop:'auto',marginBottom:'auto'}} onClick={e=>e.stopPropagation()}>
+        <div style={{color:GOLD,fontSize:16,fontWeight:'bold',marginBottom:16}}>⚙️ Sync Settings</div>
+        <Field label="Pantry ID">
+          <input style={IS} type="text" value={pantryId} onChange={e=>setPantryId(e.target.value)}/>
+        </Field>
+        <Field label="Passphrase">
+          <div style={{position:'relative'}}>
+            <input style={{...IS,paddingRight:42}} type={show?'text':'password'} value={pw} onChange={e=>setPw(e.target.value)}/>
+            <button onClick={()=>setShow(p=>!p)} style={{position:'absolute',right:10,top:'50%',transform:'translateY(-50%)',background:'none',border:'none',cursor:'pointer',fontSize:16,color:'rgba(255,255,255,.4)'}}>{show?'🙈':'👁️'}</button>
+          </div>
+        </Field>
+        <div style={{display:'flex',gap:10,marginTop:8}}>
+          <button onClick={onClose} style={{flex:1,background:'rgba(255,255,255,.06)',border:`1px solid ${BORDER}`,borderRadius:12,padding:'13px',color:'rgba(255,255,255,.6)',fontSize:14,fontFamily:'inherit',cursor:'pointer'}}>Cancel</button>
+          <button onClick={()=>onSave({apiKey:pantryId,binId:'',passphrase:pw,salt})} style={{flex:2,background:`linear-gradient(135deg,${GOLD},#c08c08)`,border:'none',borderRadius:12,padding:'13px',color:'#000',fontSize:14,fontWeight:'bold',fontFamily:'inherit',cursor:'pointer'}}>💾 Save</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ─── ENTRY CARD ─── */
+function EntryCard({entry, onShare, onDelete}){
+  const ib = entry.type==='bought';
+  const ac = ib?GREEN:RED;
+  const rgb = ib?'61,220,132':'255,107,107';
+  return (
+    <div style={{background:`rgba(${rgb},.05)`,border:`1px solid rgba(${rgb},.17)`,borderRadius:14,padding:'13px 15px',marginBottom:9}}>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+        <div style={{color:'#fff',fontWeight:'bold',fontSize:15}}>👤 {entry.partyName}</div>
+        <div style={{display:'flex',gap:4}}>
+          <button onClick={()=>onShare(entry)} style={{background:'none',border:'none',cursor:'pointer',fontSize:17,padding:'2px 5px'}}>📤</button>
+          <button onClick={()=>onDelete(entry.id)} style={{background:'none',border:'none',cursor:'pointer',fontSize:17,padding:'2px 5px'}}>🗑️</button>
+        </div>
+      </div>
+      <div style={{display:'flex',gap:8,marginTop:10,flexWrap:'wrap'}}>
+        {[
+          {l:'Weight', v:`${fmtINR(entry.weight)} g`},
+          {l:'Rate',   v:`₹${fmtINR(entry.rate)}/g`},
+          {l:'Amount', v:`₹${fmtINR(entry.amount)}`, hi:true}
+        ].map(item=>(
+          <div key={item.l} style={{flex:'1 1 80px',background:item.hi?`rgba(${rgb},.12)`:'rgba(255,255,255,.05)',borderRadius:9,padding:'8px 10px',textAlign:'center'}}>
+            <div style={{color:'rgba(255,255,255,.35)',fontSize:9,textTransform:'uppercase',letterSpacing:1}}>{item.l}</div>
+            <div style={{color:item.hi?ac:'#fff',fontWeight:'bold',fontSize:13,marginTop:3}}>{item.v}</div>
+          </div>
+        ))}
+      </div>
+      {entry.narration && (
+        <div style={{marginTop:10,background:'rgba(255,255,255,.04)',border:'1px solid rgba(255,255,255,.08)',borderRadius:9,padding:'8px 12px',display:'flex',gap:7,alignItems:'flex-start'}}>
+          <span style={{fontSize:13,marginTop:1}}>📝</span>
+          <span style={{color:'rgba(255,255,255,.5)',fontSize:12,lineHeight:1.55,fontStyle:'italic'}}>{entry.narration}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ─── DAY CARD ─── */
+function DayCard({date, dayEntries, expandedDay, setExpandedDay, onShare, onDelete, onShareDay}){
+  const b = dayEntries.filter(e=>e.type==='bought');
+  const s = dayEntries.filter(e=>e.type==='sold');
+  const open = expandedDay===date;
+  return (
+    <div style={{background:CARD,border:`1px solid ${BORDER}`,borderRadius:20,marginBottom:12,overflow:'hidden'}}>
+      <div onClick={()=>setExpandedDay(open?null:date)} style={{padding:'14px 18px',display:'flex',justifyContent:'space-between',alignItems:'center',cursor:'pointer'}}>
+        <div>
+          <div style={{color:GOLD,fontWeight:'bold',fontSize:15}}>📅 {fmtDate(date)}</div>
+          <div style={{color:'rgba(255,255,255,.35)',fontSize:11,marginTop:2}}>{dayEntries.length} {dayEntries.length===1?'entry':'entries'}</div>
+        </div>
+        <div style={{display:'flex',gap:8,alignItems:'center'}}>
+          <button onClick={ev=>{ev.stopPropagation();onShareDay(date,dayEntries);}} style={{background:'rgba(245,200,66,.11)',border:'1px solid rgba(245,200,66,.27)',borderRadius:8,padding:'5px 12px',color:GOLD,fontSize:12,cursor:'pointer',fontFamily:'inherit'}}>📤 Share</button>
+          <span style={{color:'rgba(255,255,255,.3)',fontSize:16}}>{open?'▲':'▼'}</span>
+        </div>
+      </div>
+      <div style={{display:'flex',gap:8,padding:'0 18px 14px',flexWrap:'wrap'}}>
+        {b.length>0 && (
+          <div style={{background:'rgba(61,220,132,.07)',border:'1px solid rgba(61,220,132,.18)',borderRadius:9,padding:'6px 12px'}}>
+            <span style={{color:GREEN,fontSize:11,fontWeight:'bold'}}>🟢 BOUGHT </span>
+            <span style={{color:'rgba(255,255,255,.5)',fontSize:11}}>{fmtINR(sumW(b))}g · Avg ₹{fmtINR(avgR(b))} · ₹{fmtINR(sumA(b))}</span>
+          </div>
+        )}
+        {s.length>0 && (
+          <div style={{background:'rgba(255,107,107,.07)',border:'1px solid rgba(255,107,107,.18)',borderRadius:9,padding:'6px 12px'}}>
+            <span style={{color:RED,fontSize:11,fontWeight:'bold'}}>🔴 SOLD </span>
+            <span style={{color:'rgba(255,255,255,.5)',fontSize:11}}>{fmtINR(sumW(s))}g · Avg ₹{fmtINR(avgR(s))} · ₹{fmtINR(sumA(s))}</span>
+          </div>
+        )}
+      </div>
+      {open && (
+        <div style={{borderTop:`1px solid ${BORDER}`,padding:'16px 18px'}}>
+          {['bought','sold'].map(type=>{
+            const list = dayEntries.filter(e=>e.type===type);
+            if(!list.length) return null;
+            const ac2 = type==='bought'?GREEN:RED;
+            return (
+              <div key={type} style={{marginBottom:18}}>
+                <div style={{color:ac2,fontSize:11,fontWeight:'bold',letterSpacing:2,marginBottom:10,textTransform:'uppercase'}}>
+                  {type==='bought'?'🟢 Bought':'🔴 Sold'}
+                </div>
+                {list.map(e=><EntryCard key={e.id} entry={e} onShare={onShare} onDelete={onDelete}/>)}
+                <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
+                  {[
+                    {l:'Total Weight', v:`${fmtINR(sumW(list))} g`},
+                    {l:'Avg Rate',     v:`₹${fmtINR(avgR(list))}`},
+                    {l:'Total Amount', v:`₹${fmtINR(sumA(list))}`}
+                  ].map(item=>(
+                    <div key={item.l} style={{flex:'1 1 0',background:'rgba(255,255,255,.05)',border:`1px solid ${BORDER}`,borderRadius:9,padding:'8px 10px',textAlign:'center'}}>
+                      <div style={{color:'rgba(255,255,255,.32)',fontSize:9,textTransform:'uppercase',letterSpacing:1}}>{item.l}</div>
+                      <div style={{color:ac2,fontWeight:'bold',fontSize:13,marginTop:3}}>{item.v}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ─── ADD FORM ─── */
+function AddForm({form, setForm, onAdd, syncCfg, syncing, lastSync, syncStatus, onSyncSetup}){
+  const isB = form.type==='bought';
+
+  /* smart auto-calculate: update value on change, calculate 3rd field on blur */
+  const handleWeight = e => setForm(f => ({...f, weight: e.target.value}));
+  const handleRate   = e => setForm(f => ({...f, rate:   e.target.value}));
+  const handleAmount = e => setForm(f => ({...f, amount: e.target.value}));
+
+  const calcOnBlur = field => () => {
+    setForm(f => {
+      const w = f.weight, r = f.rate, a = f.amount;
+      if(field==='weight') {
+        if(w && r)   return {...f, amount:String(Math.round(+w * +r))};
+        if(w && a)   return {...f, rate:String((+a / +w).toFixed(2))};
+      }
+      if(field==='rate') {
+        if(r && w)   return {...f, amount:String(Math.round(+w * +r))};
+        if(r && a)   return {...f, weight:String((+a / +r).toFixed(2))};
+      }
+      if(field==='amount') {
+        if(a && w)   return {...f, rate:String((+a / +w).toFixed(2))};
+        if(a && r)   return {...f, weight:String((+a / +r).toFixed(2))};
+      }
+      return f;
+    });
+  };
+
+  const displayAmount = form.amount ? +form.amount : 0;
+  const pillCol = syncStatus==='ok'?GREEN : syncStatus==='error'||syncStatus==='expired'?RED : GOLD;
+  const pillLabel = syncing?'Syncing…' : syncStatus==='ok'?`Auto ✓ ${lastSync}` : syncStatus==='expired'?'Expired' : syncStatus==='error'?'Sync Error' : 'Auto-sync On';
+
+  return (
+    <div style={{background:CARD,border:`1px solid ${BORDER}`,borderRadius:22,padding:24}}>
+      <div style={{display:'flex',alignItems:'center',flexWrap:'wrap',gap:6,marginBottom:20}}>
+        <div style={{color:GOLD,fontSize:16,fontWeight:'bold'}}>New Trade Entry</div>
+        {syncCfg?.apiKey && <span className="sync-pill" style={{borderColor:pillCol,color:pillCol}}>☁️ {pillLabel}</span>}
+      </div>
+
+      <Field label="Type">
+        <div style={{display:'flex',gap:8}}>
+          {['bought','sold'].map(type => {
+            const active = form.type===type;
+            const ac = type==='bought'?GREEN:RED;
+            const rgb = type==='bought'?'61,220,132':'255,107,107';
+            return (
+              <button key={type} onClick={()=>setForm(f=>({...f,type}))}
+                style={{flex:1,padding:'13px 0',border:`2px solid ${active?ac:'rgba(255,255,255,.1)'}`,borderRadius:12,cursor:'pointer',fontFamily:'inherit',fontSize:14,fontWeight:'bold',background:active?`rgba(${rgb},.13)`:'transparent',color:active?ac:'rgba(255,255,255,.28)',transition:'all .2s'}}>
+                {type==='bought'?'🟢 BOUGHT':'🔴 SOLD'}
+              </button>
+            );
+          })}
+        </div>
+      </Field>
+
+      <Field label="Party Name">
+        <input style={IS} type="text" placeholder="e.g. Rakhul"
+          value={form.partyName} onChange={e=>setForm(f=>({...f,partyName:e.target.value}))}/>
+      </Field>
+
+      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:10}}>
+        <Field label="Weight (g)">
+          <input style={IS} type="number" step="any" placeholder="e.g. 5000"
+            value={form.weight} onChange={handleWeight} onBlur={calcOnBlur('weight')}/>
+        </Field>
+        <Field label="Rate (₹/g)">
+          <input style={IS} type="number" step="any" placeholder="e.g. 6500"
+            value={form.rate} onChange={handleRate} onBlur={calcOnBlur('rate')}/>
+        </Field>
+        <Field label="Amount (₹)">
+          <input style={IS} type="number" step="any" placeholder="e.g. 32500"
+            value={form.amount} onChange={handleAmount} onBlur={calcOnBlur('amount')}/>
+        </Field>
+      </div>
+
+      <Field label="Date">
+        <input style={IS} type="date" value={form.date}
+          onChange={e=>setForm(f=>({...f,date:e.target.value}))}/>
+      </Field>
+
+      <Field label="📝 Narration / Note (optional)">
+        <textarea rows={3} placeholder="e.g. Advance paid ₹50,000 · Quality A-grade..."
+          value={form.narration} onChange={e=>setForm(f=>({...f,narration:e.target.value}))}
+          style={{...IS,resize:'vertical',minHeight:76,lineHeight:1.55}}/>
+      </Field>
+
+      <div style={{background:displayAmount>0?(isB?'rgba(61,220,132,.09)':'rgba(255,107,107,.09)'):'rgba(255,255,255,.03)',border:`1px solid ${displayAmount>0?(isB?'rgba(61,220,132,.28)':'rgba(255,107,107,.28)'):'rgba(255,255,255,.07)'}`,borderRadius:14,padding:'14px 18px',marginBottom:18,display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+        <div>
+          <div style={{color:'rgba(255,255,255,.32)',fontSize:10,letterSpacing:2,textTransform:'uppercase'}}>
+            {form.weight&&form.rate ? `${fmtINR(form.weight)}g × ₹${fmtINR(form.rate)}` : 'Amount Preview'}
+          </div>
+          <div style={{color:displayAmount>0?(isB?GREEN:RED):'rgba(255,255,255,.18)',fontSize:24,fontWeight:'bold',marginTop:3}}>
+            ₹{fmtINR(Math.round(displayAmount))}
+          </div>
+        </div>
+        <div style={{fontSize:30}}>{displayAmount>0?(isB?'🟢':'🔴'):'💰'}</div>
+      </div>
+
+      <button onClick={onAdd} style={{width:'100%',background:`linear-gradient(135deg,${GOLD},#c08c08)`,border:'none',borderRadius:13,padding:'15px',color:'#000',fontSize:15,fontWeight:'bold',fontFamily:'inherit',cursor:'pointer',marginBottom:12}}>
+        ✅ Add Entry
+      </button>
+
+      <div style={{background:'rgba(61,220,132,.06)',border:'1px solid rgba(61,220,132,.15)',borderRadius:10,padding:'10px 14px',fontSize:11,color:'rgba(255,255,255,.5)',lineHeight:1.7,display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+        <span>
+          {syncing ? <span style={{color:GOLD}}>⏳ Syncing…</span>
+            : syncStatus==='ok' ? <span style={{color:GREEN}}>☁️ Auto-sync ON · {lastSync}</span>
+            : syncStatus==='error' ? <span style={{color:RED}}>⚠️ Sync error</span>
+            : <span>☁️ Auto-sync ON</span>
+          }
+        </span>
+        <button onClick={onSyncSetup} style={{background:'none',border:'none',color:'rgba(255,255,255,.3)',fontSize:11,cursor:'pointer',fontFamily:'inherit'}}>⚙️ settings</button>
+      </div>
+    </div>
+  );
+}
+
+/* ─── SUMMARY PANEL ─── */
+function SummaryPanel({summary, entries, daywise, onClearAll, syncing}){
+  if(entries.length===0) return (
+    <div style={{textAlign:'center',padding:'60px 20px',color:'rgba(255,255,255,.25)'}}>
+      <div style={{fontSize:48,marginBottom:12}}>📊</div>
+      <div>No data yet</div>
+    </div>
+  );
+  return (
+    <div>
+      {[
+        {label:'🟢 TOTAL BOUGHT', data:summary.bought, rgb:'61,220,132', ac:GREEN},
+        {label:'🔴 TOTAL SOLD',   data:summary.sold,   rgb:'255,107,107', ac:RED}
+      ].map(({label,data,rgb,ac})=>(
+        <div key={label} style={{background:`rgba(${rgb},.06)`,border:`1px solid rgba(${rgb},.18)`,borderRadius:20,padding:20,marginBottom:12}}>
+          <div style={{color:ac,fontSize:14,fontWeight:'bold',marginBottom:14}}>{label}</div>
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:8,marginBottom:8}}>
+            {[
+              {l:'Total Weight', v:`${fmtINR(data.weight)} g`},
+              {l:'Total Amount', v:`₹${fmtINR(data.amount)}`},
+              {l:'Entries',      v:data.count}
+            ].map(item=>(
+              <div key={item.l} style={{background:`rgba(${rgb},.09)`,borderRadius:11,padding:'10px'}}>
+                <div style={{color:'rgba(255,255,255,.35)',fontSize:9,textTransform:'uppercase',letterSpacing:1}}>{item.l}</div>
+                <div style={{color:ac,fontWeight:'bold',fontSize:14,marginTop:3}}>{item.v}</div>
+              </div>
+            ))}
+          </div>
+          <div style={{background:`rgba(${rgb},.05)`,border:`1px solid rgba(${rgb},.12)`,borderRadius:12,padding:'12px 14px'}}>
+            <div style={{color:`rgba(${rgb},.7)`,fontSize:9,textTransform:'uppercase',letterSpacing:2,marginBottom:10}}>— Average per entry —</div>
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:8}}>
+              {[
+                {l:'Avg Weight', v:`${fmtINR(data.avgWeight)} g`},
+                {l:'Avg Rate',   v:`₹${fmtINR(data.avgRate)}`},
+                {l:'Avg Amount', v:`₹${fmtINR(data.avgAmount)}`}
+              ].map(item=>(
+                <div key={item.l} style={{textAlign:'center'}}>
+                  <div style={{color:'rgba(255,255,255,.3)',fontSize:9,textTransform:'uppercase',letterSpacing:1}}>{item.l}</div>
+                  <div style={{color:'#fff',fontWeight:'bold',fontSize:13,marginTop:3}}>{item.v}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      ))}
+
+      <div style={{background:summary.pnl<=0?'rgba(61,220,132,.07)':'rgba(255,107,107,.07)',border:`1px solid rgba(${summary.pnl<=0?'61,220,132':'255,107,107'},.22)`,borderRadius:20,padding:20,marginBottom:12}}>
+        <div style={{color:'rgba(255,255,255,.38)',fontSize:10,letterSpacing:3,textTransform:'uppercase',marginBottom:12}}>📊 Net P&L — Bought minus Sold</div>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:8,marginBottom:14}}>
+          {[
+            {l:'Net Weight', v:`${fmtINR(summary.netW)} g`,       note:'Bought − Sold'},
+            {l:'Avg Rate',   v:`₹${fmtINR(summary.netAvgRate)}`,  note:'Wtd avg buy rate'},
+            {l:'Net Amount', v:`₹${fmtINR(summary.netAvgAmount)}`, note:'Net wt × avg rate'}
+          ].map(item=>(
+            <div key={item.l} style={{background:'rgba(255,255,255,.05)',border:`1px solid ${BORDER}`,borderRadius:11,padding:'10px',textAlign:'center'}}>
+              <div style={{color:'rgba(255,255,255,.32)',fontSize:9,textTransform:'uppercase',letterSpacing:1}}>{item.l}</div>
+              <div style={{color:'#fff',fontWeight:'bold',fontSize:13,marginTop:3}}>{item.v}</div>
+              <div style={{color:'rgba(255,255,255,.2)',fontSize:9,marginTop:3}}>{item.note}</div>
+            </div>
+          ))}
+        </div>
+        <div style={{borderTop:'1px solid rgba(255,255,255,.07)',paddingTop:12,display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+          <div>
+            <div style={{color:'rgba(255,255,255,.35)',fontSize:11}}>Total Bought − Total Sold</div>
+            <div style={{color:'rgba(255,255,255,.25)',fontSize:10,marginTop:2}}>{entries.length} entries · {daywise.length} day{daywise.length!==1?'s':''}</div>
+          </div>
+          <div style={{textAlign:'right'}}>
+            <div style={{color:summary.pnl<=0?GREEN:RED,fontSize:28,fontWeight:'bold'}}>{summary.pnl<=0?'+':'−'}₹{fmtINR(Math.abs(summary.pnl))}</div>
+
+          </div>
+        </div>
+      </div>
+
+      <div style={{background:'rgba(255,107,107,.05)',border:'1px solid rgba(255,107,107,.15)',borderRadius:16,padding:'16px 18px'}}>
+        <div style={{color:'rgba(255,255,255,.5)',fontSize:13,fontWeight:'bold',marginBottom:4}}>⚠️ Danger Zone</div>
+        <div style={{color:'rgba(255,255,255,.3)',fontSize:11,marginBottom:14,lineHeight:1.6}}>Permanently deletes all entries from cloud. Cannot be undone.</div>
+        <button onClick={onClearAll} disabled={syncing}
+          style={{width:'100%',background:'rgba(255,107,107,.15)',border:'1px solid rgba(255,107,107,.3)',borderRadius:10,padding:'11px',color:RED,fontSize:13,fontFamily:'inherit',cursor:'pointer',fontWeight:'bold'}}>
+          {syncing?'⏳ Deleting…':'🗑️ Delete Everything (Cloud)'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════
+   MAIN APP
+═══════════════════════════════════════ */
+function App(){
+  const [form, setForm]           = useState({...INIT, date:todayISO()});
+  const [entries, setEntries]     = useState([]);
+  const [tab, setTab]             = useState('daywise');
+  const [toast, setToast]         = useState('');
+  const [expandedDay, setExpandedDay] = useState(null);
+  const [showDisclaimer, setShowDisclaimer] = useState(()=>!lsLoad(LS_DISCLAIMER,false));
+  const [syncCfg, setSyncCfg]     = useState(()=>lsLoad(LS_SYNC,null));
+  const [showSyncModal, setShowSyncModal] = useState(false);
+  const [syncing, setSyncing]     = useState(false);
+  const [syncStatus, setSyncStatus] = useState('');
+  const [lastSync, setLastSync]   = useState('');
+
+  const showToast = useCallback(msg => { setToast(msg); setTimeout(()=>setToast(''), 3000); }, []);
+
+  /* ── sync ── */
+  const doSync = useCallback(async (push, silent=false) => {
+    if(!syncCfg?.apiKey || !syncCfg?.passphrase){ if(!silent) showToast('⚙️ Set up sync first'); return; }
+    setSyncing(true);
+    try {
+      if(push){
+        await cloudPush(syncCfg.apiKey, syncCfg.passphrase, syncCfg.salt, entries);
+        setSyncStatus('ok');
+        setLastSync(new Date().toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'}));
+        if(!silent) showToast('☁️ Pushed!');
+      } else {
+        const data = await cloudPull(syncCfg.apiKey, syncCfg.passphrase, syncCfg.salt);
+        if(data?.entries) setEntries(data.entries);
+        setSyncStatus('ok');
+        setLastSync(new Date().toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'}));
+        if(!silent) showToast('☁️ Pulled!');
+      }
+    } catch(err){
+      if(!silent){
+        setSyncStatus('error');
+        if(err.message==='EXPIRED')  showToast('⏰ Cloud data expired (7 days).');
+        else if(err.message==='NOBASKET') showToast('📭 No cloud data yet — add an entry first.');
+        else showToast('❌ '+err.message);
+      }
+    } finally { setSyncing(false); }
+  }, [syncCfg, entries, showToast]);
+
+  /* auto pull on open */
+  useEffect(()=>{
+    if(syncCfg?.apiKey && syncCfg?.passphrase) doSync(false, true);
+  // eslint-disable-next-line
+  },[]);
+
+  /* auto push 3s after entries change */
+  useEffect(()=>{
+    if(!syncCfg?.apiKey || !syncCfg?.passphrase) return;
+    const t = setTimeout(()=>doSync(true, true), 3000);
+    return ()=>clearTimeout(t);
+  }, [entries, syncCfg]);
+
+  /* ── handlers ── */
+  const handleAdd = useCallback(()=>{
+    const filled = [form.weight, form.rate, form.amount].filter(v=>v&&+v>0).length;
+    if(!form.partyName || filled < 2){ showToast('⚠️ Fill Party Name + any 2 of Weight/Rate/Amount'); return; }
+    if(!form.date){ showToast('⚠️ Pick a date'); return; }
+    const w = +form.weight || 0;
+    const r = +form.rate   || 0;
+    const a = +form.amount || Math.round(w*r);
+    setEntries(prev=>[{...form, weight:w, rate:r, amount:a, id:Date.now()}, ...prev]);
+    setForm(f=>({...INIT, date:f.date, type:f.type}));
+    showToast('✅ Entry saved!');
+  }, [form, showToast]);
+
+  const handleDelete = useCallback(id=>{
+    if(!window.confirm('Delete this entry?')) return;
+    setEntries(prev=>prev.filter(e=>e.id!==id));
+    showToast('🗑️ Deleted');
+  }, [showToast]);
+
+  const doShare = useCallback(async (text, title)=>{
+    if(navigator.share){ try{ await navigator.share({title,text}); showToast('📤 Shared!'); return; }catch(e){} }
+    try{ await navigator.clipboard.writeText(text); showToast('📋 Copied!'); }catch(e){ showToast('Copy failed'); }
+  }, [showToast]);
+
+  const shareEntry = useCallback(e => doShare(
+    `📋 Trade — ${e.type.toUpperCase()}\n👤 ${e.partyName}\n⚖️ ${fmtINR(e.weight)} g\n💰 ₹${fmtINR(e.rate)}/g\n💵 ₹${fmtINR(e.amount)}\n📅 ${fmtDate(e.date)}${e.narration?'\n📝 '+e.narration:''}`,
+    'Trade - '+e.partyName
+  ), [doShare]);
+
+  const shareDay = useCallback((date, de)=>{
+    const b=de.filter(e=>e.type==='bought'), s=de.filter(e=>e.type==='sold');
+    const sec=(lbl,list)=>!list.length?'':
+      `${lbl}\n${list.map(e=>`  • ${e.partyName}: ${fmtINR(e.weight)}g @ ₹${fmtINR(e.rate)} = ₹${fmtINR(e.amount)}${e.narration?' ['+e.narration+']':''}`).join('\n')}\n  Total: ${fmtINR(sumW(list))}g | Avg ₹${fmtINR(avgR(list))} | ₹${fmtINR(sumA(list))}`;
+    doShare([`📅 ${fmtDate(date)}`, sec('🟢 BOUGHT',b), sec('🔴 SOLD',s)].filter(Boolean).join('\n\n'), 'Day Report');
+  }, [doShare]);
+
+  const handleClearAll = useCallback(async ()=>{
+    if(!window.confirm('⚠️ Delete ALL entries from cloud?\n\nThis cannot be undone.')) return;
+    setSyncing(true);
+    try{
+      if(syncCfg?.apiKey) await cloudDeleteBasket(syncCfg.apiKey);
+      setEntries([]);
+      setSyncStatus(''); setLastSync('');
+      showToast('✅ All data deleted');
+    }catch(err){ showToast('❌ Delete failed: '+err.message); }
+    finally{ setSyncing(false); }
+  }, [syncCfg, showToast]);
+
+  const saveSyncCfg = useCallback(cfg=>{
+    setSyncCfg(cfg); lsSave(LS_SYNC,cfg); setShowSyncModal(false); showToast('✅ Sync saved!');
+  }, [showToast]);
+
+  /* ── derived data ── */
+  const daywise = useMemo(()=>{
+    const map = {};
+    entries.forEach(e=>{ (map[e.date]=map[e.date]||[]).push(e); });
+    return Object.keys(map).sort((a,b)=>b.localeCompare(a)).map(date=>({date,entries:map[date]}));
+  }, [entries]);
+
+  const summary = useMemo(()=>{
+    const b = entries.filter(e=>e.type==='bought');
+    const s = entries.filter(e=>e.type==='sold');
+    const bW=sumW(b), sW=sumW(s), bA=sumA(b), sA=sumA(s);
+    return {
+      bought:{ count:b.length, weight:bW, amount:bA, avgRate:avgR(b), avgWeight:b.length?Math.round(bW/b.length):0, avgAmount:b.length?Math.round(bA/b.length):0 },
+      sold:{   count:s.length, weight:sW, amount:sA, avgRate:avgR(s), avgWeight:s.length?Math.round(sW/s.length):0, avgAmount:s.length?Math.round(sA/s.length):0 },
+      pnl: bA-sA,
+      netW: bW-sW,
+      netAvgRate: bW?Math.round(bA/bW):0,
+      netAvgAmount: (bW-sW)>0 ? (bW-sW)*(bW?Math.round(bA/bW):0) : 0,
+    };
+  }, [entries]);
+
+  const DayList = () => daywise.length===0
+    ? <div style={{textAlign:'center',padding:'60px 20px',color:'rgba(255,255,255,.25)'}}><div style={{fontSize:48,marginBottom:12}}>📭</div><div>No entries yet</div></div>
+    : daywise.map(({date,entries:de})=>(
+        <DayCard key={date} date={date} dayEntries={de}
+          expandedDay={expandedDay} setExpandedDay={setExpandedDay}
+          onShare={shareEntry} onDelete={handleDelete} onShareDay={shareDay}/>
+      ));
+
+  return (
+    <div style={{minHeight:'100vh',display:'flex',flexDirection:'column'}}>
+      <div className="glow"/>
+
+      {showDisclaimer && (
+        <DisclaimerModal onAccept={pw=>{
+          const salt = bytesToHex(crypto.getRandomValues(new Uint8Array(16)));
+          const cfg = {apiKey:DEFAULT_PANTRY_ID, binId:'', passphrase:pw, salt};
+          setSyncCfg(cfg); lsSave(LS_SYNC,cfg);
+          lsSave(LS_DISCLAIMER,true); setShowDisclaimer(false);
+        }}/>
+      )}
+      {showSyncModal && <SyncModal syncCfg={syncCfg} onSave={saveSyncCfg} onClose={()=>setShowSyncModal(false)}/>}
+
+      <header style={{position:'sticky',top:0,zIndex:20,background:'rgba(8,11,16,.93)',backdropFilter:'blur(18px)',borderBottom:'1px solid rgba(245,200,66,.12)',padding:'12px 22px',display:'flex',alignItems:'center',justifyContent:'space-between',flexShrink:0}}>
+        <div>
+          <div style={{fontSize:9,letterSpacing:5,color:GOLD,textTransform:'uppercase',marginBottom:1}}>Gold Trade</div>
+          <div style={{fontSize:20,fontWeight:'bold'}}>📒 Ledger Book</div>
+        </div>
+        <div style={{textAlign:'right'}}>
+          <div style={{color:'rgba(255,255,255,.25)',fontSize:11}}>{new Date().toLocaleDateString('en-IN',{weekday:'short',day:'2-digit',month:'short',year:'numeric'})}</div>
+          {entries.length>0 && <div style={{color:'rgba(61,220,132,.55)',fontSize:10,marginTop:2}}>☁️ {entries.length} entries</div>}
+        </div>
+      </header>
+
+      {/* Desktop */}
+      <div className="desktop-layout" style={{flex:1,maxWidth:1200,margin:'0 auto',width:'100%',padding:'22px 24px 40px',gap:24,alignItems:'flex-start',position:'relative',zIndex:1}}>
+        <div style={{flex:'0 0 420px',minWidth:0,position:'sticky',top:70,maxHeight:'calc(100vh - 80px)',overflowY:'auto'}}>
+          <AddForm form={form} setForm={setForm} onAdd={handleAdd}
+            syncCfg={syncCfg} syncing={syncing} lastSync={lastSync} syncStatus={syncStatus}
+            onSyncSetup={()=>setShowSyncModal(true)}/>
+        </div>
+        <div style={{flex:1,minWidth:0}}>
+          <div style={{display:'flex',gap:4,background:'rgba(255,255,255,.04)',borderRadius:12,padding:4,marginBottom:16}}>
+            {[{key:'daywise',label:`📅 Day-wise (${daywise.length})`},{key:'summary',label:'📊 Summary'}].map(t=>(
+              <button key={t.key} onClick={()=>setTab(t.key)}
+                style={{flex:1,padding:'9px 6px',border:'none',borderRadius:9,cursor:'pointer',fontFamily:'inherit',fontSize:13,fontWeight:'bold',transition:'all .2s',background:tab===t.key?`linear-gradient(135deg,${GOLD},#c08c08)`:'transparent',color:tab===t.key?'#000':'rgba(255,255,255,.4)'}}>
+                {t.label}
+              </button>
+            ))}
+          </div>
+          {tab==='daywise' && <DayList/>}
+          {tab==='summary' && <SummaryPanel summary={summary} entries={entries} daywise={daywise} onClearAll={handleClearAll} syncing={syncing}/>}
+        </div>
+      </div>
+
+      {/* Mobile */}
+      <div className="mobile-layout">
+        {tab==='add'     && <AddForm form={form} setForm={setForm} onAdd={handleAdd} syncCfg={syncCfg} syncing={syncing} lastSync={lastSync} syncStatus={syncStatus} onSyncSetup={()=>setShowSyncModal(true)}/>}
+        {tab==='daywise' && <DayList/>}
+        {tab==='summary' && <SummaryPanel summary={summary} entries={entries} daywise={daywise} onClearAll={handleClearAll} syncing={syncing}/>}
+      </div>
+      <div className="mobile-nav">
+        {[{key:'add',em:'➕',label:'Add'},{key:'daywise',em:'📅',label:`Days(${daywise.length})`},{key:'summary',em:'📊',label:'Summary'}].map(t=>(
+          <button key={t.key} onClick={()=>setTab(t.key)}
+            style={{flex:1,padding:'10px 4px 14px',border:'none',background:'transparent',cursor:'pointer',fontFamily:'inherit',borderTop:`2px solid ${tab===t.key?GOLD:'transparent'}`}}>
+            <div style={{fontSize:20}}>{t.em}</div>
+            <div style={{color:tab===t.key?GOLD:'rgba(255,255,255,.32)',fontSize:10,marginTop:2}}>{t.label}</div>
+          </button>
+        ))}
+      </div>
+
+      <div style={{borderTop:`1px solid ${BORDER}`,padding:'12px 24px',textAlign:'center',color:'rgba(255,255,255,.2)',fontSize:10,lineHeight:1.8,background:'rgba(8,11,16,.8)'}}>
+        ⚖️ For <strong style={{color:'rgba(255,255,255,.35)'}}>educational and personal record-keeping use only</strong>. Not financial or legal advice. Developer accepts no liability. End-to-end encrypted; server stores only ciphertext. Cloud data auto-deletes after 7 days.
+      </div>
+
+      {toast && (
+        <div style={{position:'fixed',bottom:80,left:'50%',transform:'translateX(-50%)',background:'rgba(8,11,16,.97)',border:'1px solid rgba(245,200,66,.35)',color:'#fff',padding:'11px 22px',borderRadius:12,fontSize:13,fontWeight:'bold',zIndex:500,backdropFilter:'blur(20px)',whiteSpace:'nowrap',maxWidth:'90vw',textAlign:'center'}}>
+          {toast}
+        </div>
+      )}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>
+/* ══════════════════════════════════════════
+   MAIN APP
+══════════════════════════════════════════ */
+function App(){
+  const [form,setForm]=useState(INIT);
+  const [entries,setEntries]=useState([]);
+  const [tab,setTab]=useState('daywise');
+  const [toast,setToast]=useState('');
+  const [expandedDay,setExpandedDay]=useState(null);
+  const [showDisclaimer,setShowDisclaimer]=useState(()=>!lsLoad(LS_DISCLAIMER,false));
+  const [syncCfg,setSyncCfg]=useState(()=>lsLoad(LS_SYNC,null));
+  const [showSyncModal,setShowSyncModal]=useState(false);
+  const [syncing,setSyncing]=useState(false);
+  const [syncStatus,setSyncStatus]=useState('');
+  const [lastSync,setLastSync]=useState('');
+  const [lastSaved,setLastSaved]=useState('');
+
+  const showToast=useCallback(msg=>{setToast(msg);setTimeout(()=>setToast(''),3000);},[]);
+
+  // doSync defined BEFORE any useEffect that calls it
+  const doSync=useCallback(async(push,silent=false)=>{
+    if(!syncCfg?.apiKey||!syncCfg?.passphrase){if(!silent)showToast('⚙️ Set up sync first');return;}
+    setSyncing(true);
+    try{
+      if(push){
+        await cloudPush(syncCfg.apiKey,syncCfg.passphrase,syncCfg.salt,entries);
+        setSyncStatus('ok');
+        setLastSync(new Date().toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'}));
+        if(!silent)showToast('☁️ Pushed to cloud!');
+      }else{
+        const data=await cloudPull(syncCfg.apiKey,syncCfg.passphrase,syncCfg.salt);
+        if(data.entries&&data.entries.length>0){
+          setEntries(prev=>{
+            const cloudIds=new Set(data.entries.map(e=>e.id));
+            const localOnly=prev.filter(e=>!cloudIds.has(e.id));
+            const merged=[...data.entries,...localOnly];
+            merged.sort((a,b)=>b.id-a.id);
+            return merged;
+          });
+        }
+        setSyncStatus('ok');
+        setLastSync(new Date().toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'}));
+        if(!silent)showToast('☁️ Data pulled!');
+      }
+    }catch(err){
+      if(!silent){
+        setSyncStatus('error');
+        if(err.message==='EXPIRED') showToast('⏰ Cloud data expired (7 days).');
+        else if(err.message==='NOBASKET') showToast('📭 No cloud data yet — push first.');
+        else showToast('❌ Sync failed: '+err.message);
+      }
+    }finally{setSyncing(false);}
+  },[syncCfg,entries,showToast]);
+
+  // Effects AFTER doSync is defined
+  useEffect(()=>{
+    if(entries.length>0) setLastSaved(new Date().toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'}));
+  },[entries]);
+
+  // Auto-pull on open
+  const syncCfgRef=React.useRef(syncCfg);
+  useEffect(()=>{
+    if(syncCfgRef.current?.apiKey&&syncCfgRef.current?.passphrase){
+      (async()=>{
+        setSyncing(true);
+        try{
+          const data=await cloudPull(syncCfgRef.current.apiKey,syncCfgRef.current.passphrase,syncCfgRef.current.salt);
+          if(data.entries&&data.entries.length>0){
+            setEntries(data.entries);
+          }
+          setSyncStatus('ok');
+          setLastSync(new Date().toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'}));
+        }catch(err){
+          if(err.message!=='NOBASKET') setSyncStatus('error');
+        }finally{setSyncing(false);}
+      })();
+    }
+  // eslint-disable-next-line
+  },[]);
+
+  // Auto-push 3s after entries change
+  useEffect(()=>{
+    if(!syncCfg?.apiKey||!syncCfg?.passphrase) return;
+    const timer=setTimeout(()=>doSync(true,true),3000);
+    return ()=>clearTimeout(timer);
+  },[entries,syncCfg,doSync]);
+
+  const handleAdd=useCallback(()=>{
+    const hasTwo=[form.weight,form.rate,form.amount].filter(v=>v&&+v>0).length>=2;
+    if(!form.partyName||!hasTwo){showToast('⚠️ Fill Party Name + any 2 of Weight/Rate/Amount');return;}
+    const entryAmount=+form.amount||Math.round(+form.weight * +form.rate);
+    setEntries(prev=>[{...form,amount:entryAmount,id:Date.now()},...prev]);
+    setForm(f=>({...INIT,date:f.date,type:f.type}));
+    showToast('✅ Entry saved!');
+  },[form,showToast]);
+
+  const handleDelete=useCallback(id=>{
+    if(!window.confirm('Delete this entry?'))return;
+    setEntries(prev=>prev.filter(e=>e.id!==id));
+    showToast('🗑️ Deleted');
+  },[showToast]);
+
+  const doShare=useCallback(async(text,title)=>{
+    if(navigator.share){try{await navigator.share({title,text});showToast('📤 Shared!');return;}catch(e){}}
+    try{await navigator.clipboard.writeText(text);showToast('📋 Copied!');}catch(e){showToast('📋 Copy failed');}
+  },[showToast]);
+
+  const shareEntry=useCallback(e=>doShare(
+    `📋 Trade — ${e.type.toUpperCase()}\n👤 Party: ${e.partyName}\n⚖️ Weight: ${fmtINR(e.weight)} g\n💰 Rate: ₹${fmtINR(e.rate)}/g\n💵 Amount: ₹${fmtINR(e.amount)}\n📅 Date: ${fmtDate(e.date)}${e.narration?`\n📝 Note: ${e.narration}`:''}`,
+    `Trade - ${e.partyName}`
+  ),[doShare]);
+
+  const shareDay=useCallback((date,de)=>{
+    const b=de.filter(e=>e.type==='bought'),s=de.filter(e=>e.type==='sold');
+    const sec=(lbl,list)=>!list.length?'':
+      `${lbl}\n${list.map(e=>`  • ${e.partyName}: ${fmtINR(e.weight)}g @ ₹${fmtINR(e.rate)} = ₹${fmtINR(e.amount)}${e.narration?` [${e.narration}]`:''}`).join('\n')}\n  Total: ${fmtINR(sumW(list))}g | Avg ₹${fmtINR(avgR(list))} | ₹${fmtINR(sumA(list))}`;
+    doShare([`📅 Day Report — ${fmtDate(date)}`,sec('🟢 BOUGHT',b),sec('🔴 SOLD',s)].filter(Boolean).join('\n\n'),'Day Report');
+  },[doShare]);
+
+  const handleClearAll=useCallback(async()=>{
+    if(!window.confirm('⚠️ Delete ALL entries from device AND cloud?\n\nThis cannot be undone.'))return;
+    setSyncing(true);
+    try{
+      if(syncCfg?.apiKey) await cloudDelete(syncCfg.apiKey);
+      setEntries([]);
+      setSyncStatus('');setLastSync('');setLastSaved('');
+      showToast('✅ All data deleted');
+    }catch(err){showToast('❌ Delete failed: '+err.message);}
+    finally{setSyncing(false);}
+  },[syncCfg,showToast]);
+
+  const saveSyncCfg=useCallback(cfg=>{
+    setSyncCfg(cfg);lsSave(LS_SYNC,cfg);setShowSyncModal(false);showToast('✅ Sync configured!');
+  },[showToast]);
+
+  const daywise=useMemo(()=>{
+    const map={};
+    entries.forEach(e=>{(map[e.date]=map[e.date]||[]).push(e);});
+    return Object.keys(map).sort((a,b)=>b.localeCompare(a)).map(date=>({date,entries:map[date]}));
+  },[entries]);
+
+  const summary=useMemo(()=>{
+    const b=entries.filter(e=>e.type==='bought'),s=entries.filter(e=>e.type==='sold');
+    const bW=sumW(b),sW=sumW(s),bA=sumA(b),sA=sumA(s);
+    return{
+      bought:{count:b.length,weight:bW,amount:bA,avgRate:avgR(b),avgWeight:b.length?Math.round(bW/b.length):0,avgAmount:b.length?Math.round(bA/b.length):0},
+      sold:{count:s.length,weight:sW,amount:sA,avgRate:avgR(s),avgWeight:s.length?Math.round(sW/s.length):0,avgAmount:s.length?Math.round(sA/s.length):0},
+      pnl:bA-sA,netW:bW-sW,
+      netAvgRate:bW?Math.round(bA/bW):0,
+      netAvgAmount:(bW-sW)>0?(bW-sW)*(bW?Math.round(bA/bW):0):0,
+    };
+  },[entries]);
+
+  const DayList=()=>daywise.length===0
+    ?<div style={{textAlign:'center',padding:'60px 20px',color:'rgba(255,255,255,.25)'}}><div style={{fontSize:48,marginBottom:12}}>📭</div><div>No entries yet</div></div>
+    :daywise.map(({date,entries:de})=><DayCard key={date} date={date} dayEntries={de} expandedDay={expandedDay} setExpandedDay={setExpandedDay} onShare={shareEntry} onDelete={handleDelete} onShareDay={shareDay}/>);
+
+  return(
+    <div style={{minHeight:'100vh',display:'flex',flexDirection:'column'}}>
+      <div className="glow"/>
+
+      {showDisclaimer&&<DisclaimerModal onAccept={(passphrase)=>{
+        const salt=bytesToHex(crypto.getRandomValues(new Uint8Array(16)));
+        const cfg={apiKey:DEFAULT_PANTRY_ID,binId:'',passphrase,salt};
+        setSyncCfg(cfg);lsSave(LS_SYNC,cfg);
+        lsSave(LS_DISCLAIMER,true);setShowDisclaimer(false);
+      }}/>}
+      {showSyncModal&&<SyncModal syncCfg={syncCfg} onSave={saveSyncCfg} onClose={()=>setShowSyncModal(false)}/>}
+
+      <header style={{position:'sticky',top:0,zIndex:20,background:'rgba(8,11,16,.93)',backdropFilter:'blur(18px)',borderBottom:'1px solid rgba(245,200,66,.12)',padding:'12px 22px',display:'flex',alignItems:'center',justifyContent:'space-between',flexShrink:0}}>
+        <div>
+          <div style={{fontSize:9,letterSpacing:5,color:GOLD,textTransform:'uppercase',marginBottom:1}}>Gold Trade</div>
+          <div style={{fontSize:20,fontWeight:'bold'}}>📒 Ledger Book</div>
+        </div>
+        <div style={{textAlign:'right'}}>
+          <div style={{color:'rgba(255,255,255,.25)',fontSize:11}}>{new Date().toLocaleDateString('en-IN',{weekday:'short',day:'2-digit',month:'short',year:'numeric'})}</div>
+          {syncing&&<div style={{color:GOLD,fontSize:10,marginTop:2}}>⏳ Syncing…</div>}
+          {!syncing&&entries.length>0&&<div style={{color:'rgba(61,220,132,.55)',fontSize:10,marginTop:2}}>☁️ {entries.length} entries (cloud only)</div>}
+        </div>
+      </header>
+
+      {/* Desktop */}
+      <div className="desktop-layout" style={{flex:1,maxWidth:1200,margin:'0 auto',width:'100%',padding:'22px 24px 40px',gap:24,alignItems:'flex-start',position:'relative',zIndex:1}}>
+        <div style={{flex:'0 0 420px',minWidth:0,position:'sticky',top:70,maxHeight:'calc(100vh - 80px)',overflowY:'auto'}}>
+          <AddForm form={form} setForm={setForm} onAdd={handleAdd} syncCfg={syncCfg} syncing={syncing} lastSaved={lastSaved} lastSync={lastSync} syncStatus={syncStatus} onSyncSetup={()=>setShowSyncModal(true)} onPush={()=>doSync(true)} onPull={()=>doSync(false)}/>
+        </div>
+        <div style={{flex:1,minWidth:0}}>
+          <div style={{display:'flex',gap:4,background:'rgba(255,255,255,.04)',borderRadius:12,padding:4,marginBottom:16}}>
+            {[{key:'daywise',label:`📅 Day-wise (${daywise.length})`},{key:'summary',label:'📊 Summary'}].map(t=>(
+              <button key={t.key} onClick={()=>setTab(t.key)} style={{flex:1,padding:'9px 6px',border:'none',borderRadius:9,cursor:'pointer',fontFamily:'inherit',fontSize:13,fontWeight:'bold',transition:'all .2s',background:tab===t.key?`linear-gradient(135deg,${GOLD},#c08c08)`:'transparent',color:tab===t.key?'#000':'rgba(255,255,255,.4)'}}>{t.label}</button>
+            ))}
+          </div>
+          {tab==='daywise'&&<DayList/>}
+          {tab==='summary'&&<SummaryPanel summary={summary} entries={entries} daywise={daywise} onClearAll={handleClearAll} syncing={syncing}/>}
+        </div>
+      </div>
+
+      {/* Mobile */}
+      <div className="mobile-layout">
+        {tab==='add'&&<AddForm form={form} setForm={setForm} onAdd={handleAdd} syncCfg={syncCfg} syncing={syncing} lastSaved={lastSaved} lastSync={lastSync} syncStatus={syncStatus} onSyncSetup={()=>setShowSyncModal(true)} onPush={()=>doSync(true)} onPull={()=>doSync(false)}/>}
+        {tab==='daywise'&&<DayList/>}
+        {tab==='summary'&&<SummaryPanel summary={summary} entries={entries} daywise={daywise} onClearAll={handleClearAll} syncing={syncing}/>}
+      </div>
+
+      <div className="mobile-nav">
+        {[{key:'add',em:'➕',label:'Add'},{key:'daywise',em:'📅',label:`Days(${daywise.length})`},{key:'summary',em:'📊',label:'Summary'}].map(t=>(
+          <button key={t.key} onClick={()=>setTab(t.key)} style={{flex:1,padding:'10px 4px 14px',border:'none',background:'transparent',cursor:'pointer',fontFamily:'inherit',borderTop:`2px solid ${tab===t.key?GOLD:'transparent'}`}}>
+            <div style={{fontSize:20}}>{t.em}</div>
+            <div style={{color:tab===t.key?GOLD:'rgba(255,255,255,.32)',fontSize:10,marginTop:2}}>{t.label}</div>
+          </button>
+        ))}
+      </div>
+
+      <div style={{borderTop:`1px solid ${BORDER}`,padding:'12px 24px',textAlign:'center',color:'rgba(255,255,255,.2)',fontSize:10,lineHeight:1.8,background:'rgba(8,11,16,.8)'}}>
+        ⚖️ For <strong style={{color:'rgba(255,255,255,.35)'}}>educational and personal record-keeping use only</strong>. Not financial or legal advice. Developer accepts no liability. All data is end-to-end encrypted; server stores only ciphertext. Cloud data auto-deletes after 7 days.
+      </div>
+
+      {toast&&<div style={{position:'fixed',bottom:80,left:'50%',transform:'translateX(-50%)',background:'rgba(8,11,16,.97)',border:'1px solid rgba(245,200,66,.35)',color:'#fff',padding:'11px 22px',borderRadius:12,fontSize:13,fontWeight:'bold',zIndex:500,backdropFilter:'blur(20px)',whiteSpace:'nowrap',maxWidth:'90vw',textAlign:'center'}}>{toast}</div>}
+    </div>
+  );
+}
+
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>
