@@ -8,9 +8,55 @@
 <meta name="mobile-web-app-capable" content="yes"/>
 <meta name="theme-color" content="#080b10"/>
 <title>📒 Trade Ledger</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<script>
+// Multi-CDN fallback loader
+(function(){
+  var cdns = [
+    {
+      react:    'https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js',
+      reactdom: 'https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js',
+      babel:    'https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js'
+    },
+    {
+      react:    'https://unpkg.com/react@18.2.0/umd/react.production.min.js',
+      reactdom: 'https://unpkg.com/react-dom@18.2.0/umd/react-dom.production.min.js',
+      babel:    'https://unpkg.com/@babel/standalone@7.23.2/babel.min.js'
+    },
+    {
+      react:    'https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js',
+      reactdom: 'https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js',
+      babel:    'https://cdn.jsdelivr.net/npm/@babel/standalone@7.23.2/babel.min.js'
+    }
+  ];
+  function loadScript(url, cb) {
+    var s = document.createElement('script');
+    s.src = url;
+    s.onload = function(){ cb(null); };
+    s.onerror = function(){ cb(new Error('failed')); };
+    document.head.appendChild(s);
+  }
+  function tryLoad(idx) {
+    if(idx >= cdns.length) {
+      document.body.innerHTML = '<div style="font-family:sans-serif;padding:40px;background:#111;color:#ff6b6b;min-height:100vh"><h2>⚠️ No Internet Connection</h2><p style="margin-top:16px;color:#ccc">This app needs internet to load once. Please connect to WiFi or mobile data and refresh the page.</p><br><button onclick="location.reload()" style="background:#f5c842;color:#000;border:none;padding:12px 24px;border-radius:8px;font-size:16px;cursor:pointer">🔄 Retry</button></div>';
+      return;
+    }
+    var c = cdns[idx];
+    loadScript(c.react, function(e1){
+      if(e1){ tryLoad(idx+1); return; }
+      loadScript(c.reactdom, function(e2){
+        if(e2){ tryLoad(idx+1); return; }
+        loadScript(c.babel, function(e3){
+          if(e3){ tryLoad(idx+1); return; }
+          // All 3 loaded! Now transform and run the app
+          var appScript = document.getElementById('app-source');
+          if(appScript) Babel.transform && eval(Babel.transform(appScript.textContent, {presets:['react']}).code);
+        });
+      });
+    });
+  }
+  tryLoad(0);
+})();
+</script>
 <style>
 *,*::before,*::after{box-sizing:border-box;-webkit-tap-highlight-color:transparent;margin:0;padding:0}
 body{background:#080b10;color:#fff;font-family:'Palatino Linotype',Palatino,Georgia,serif;min-height:100vh}
@@ -37,7 +83,8 @@ textarea{resize:vertical}
 </head>
 <body>
 <div id="root"></div>
-<script type="text/babel">
+<div style="display:none;visibility:hidden;position:absolute;width:0;height:0;overflow:hidden">
+<script type="text/x-template" id="app-source" style="display:none;visibility:hidden;position:absolute;width:0;height:0;overflow:hidden">
 const {useState, useMemo, useEffect, useCallback} = React;
 
 /* ─── CONSTANTS ─── */
@@ -945,5 +992,6 @@ function App(){
 
 ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
 </script>
+</div>
 </body>
 </html>
