@@ -582,7 +582,7 @@ function SummaryPanel({summary, entries, daywise, onClearAll, syncing}){
         </div>
       ))}
 
-      <div style={{background:summary.pnl<=0?'rgba(61,220,132,.07)':'rgba(255,107,107,.07)',border:`1px solid rgba(${summary.pnl<=0?'61,220,132':'255,107,107'},.22)`,borderRadius:20,padding:20,marginBottom:12}}>
+      <div style={{background:summary.pnl>=0?'rgba(61,220,132,.07)':'rgba(255,107,107,.07)',border:`1px solid rgba(${summary.pnl>=0?'61,220,132':'255,107,107'},.22)`,borderRadius:20,padding:20,marginBottom:12}}>
         <div style={{color:'rgba(255,255,255,.38)',fontSize:10,letterSpacing:3,textTransform:'uppercase',marginBottom:12}}>📊 Net P&L — Bought minus Sold</div>
         <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:8,marginBottom:14}}>
           {[
@@ -603,7 +603,7 @@ function SummaryPanel({summary, entries, daywise, onClearAll, syncing}){
             <div style={{color:'rgba(255,255,255,.25)',fontSize:10,marginTop:2}}>{entries.length} entries · {daywise.length} day{daywise.length!==1?'s':''}</div>
           </div>
           <div style={{textAlign:'right'}}>
-            <div style={{color:summary.pnl<=0?GREEN:RED,fontSize:28,fontWeight:'bold'}}>{summary.pnl<=0?'+':'−'}₹{fmtINR(Math.abs(summary.pnl))}</div>
+            <div style={{color:summary.pnl>=0?GREEN:RED,fontSize:28,fontWeight:'bold'}}>{summary.pnl>=0?'+':'−'}₹{fmtINR(Math.abs(summary.pnl))}</div>
 
           </div>
         </div>
